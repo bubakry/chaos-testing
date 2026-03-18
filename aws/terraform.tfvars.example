@@ -1,0 +1,11 @@
+aws_region          = "us-east-1"
+expected_account_id = ""
+project_name        = "chaos-game-day"
+environment         = "demo"
+target_deregistration_delay_seconds = 15
+ecs_force_delete                    = true
+
+# Email subscriptions for SNS topics.
+# Confirm the subscription emails after first apply.
+primary_oncall_email   = "primary-oncall@example.com"
+secondary_oncall_email = "secondary-oncall@example.com"

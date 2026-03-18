@@ -1,0 +1,63 @@
+groups:
+  - name: chaos-game-day
+    rules:
+      - alert: ChaosApiDown
+        expr: up{job="chaos-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: chaos-api
+        annotations:
+          summary: "Chaos API is unavailable"
+          description: "Prometheus cannot scrape chaos-api for more than 1 minute."
+
+      - alert: High5xxErrorRate
+        expr: |
+          (
+            sum(rate(chaos_http_requests_total{job="chaos-api",status=~"5.."}[2m]))
+            /
+            clamp_min(sum(rate(chaos_http_requests_total{job="chaos-api"}[2m])), 0.001)
+          ) > 0.20
+        for: 2m
+        labels:
+          severity: critical
+          service: chaos-api
+        annotations:
+          summary: "High 5xx rate on chaos-api"
+          description: "More than 20% of requests are failing for at least 2 minutes."
+
+      - alert: HighP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(chaos_http_request_duration_seconds_bucket{job="chaos-api",route=~"/api/.*"}[5m])
+            )
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: chaos-api
+        annotations:
+          summary: "High p95 latency on business endpoints"
+          description: "p95 latency is above 1 second for at least 5 minutes."
+
+      - alert: SimulatedDependencyOutage
+        expr: chaos_dependency_available{job="chaos-api"} == 0
+        for: 30s
+        labels:
+          severity: warning
+          service: chaos-api
+        annotations:
+          summary: "Dependency outage simulation is active"
+          description: "The dependency-down chaos switch is enabled."
+
+      - alert: RetainedMemoryPressure
+        expr: chaos_retained_memory_mb{job="chaos-api"} > 200
+        for: 1m
+        labels:
+          severity: warning
+          service: chaos-api
+        annotations:
+          summary: "Retained memory is above safe game-day threshold"
+          description: "Injected retained memory exceeded 200 MB for 1 minute."

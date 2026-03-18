@@ -1,0 +1,10 @@
+app/node_modules/
+scripts/__pycache__/
+*.pyc
+*.log
+*.out
+aws/.terraform/
+aws/.terraform.lock.hcl
+aws/terraform.tfstate
+aws/terraform.tfstate.backup
+aws/*.tfvars
