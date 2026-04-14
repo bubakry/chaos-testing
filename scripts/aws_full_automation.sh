@@ -54,18 +54,20 @@ else
   unset AWS_DEFAULT_PROFILE || true
 fi
 
+HEALTH_TMP_FILE="/tmp/chaos-health-$$.json"
+
 wait_for_health() {
   local base_url="$1"
   local elapsed=0
 
   echo "Waiting for healthy endpoint at ${base_url}/healthz ..."
   while [ "$elapsed" -lt "$HEALTH_TIMEOUT_SECONDS" ]; do
-    code=$(curl -m 4 --connect-timeout 2 -s -o /tmp/chaos-health.json -w '%{http_code}' "${base_url}/healthz" || true)
+    code=$(curl -m 4 --connect-timeout 2 -s -o "$HEALTH_TMP_FILE" -w '%{http_code}' "${base_url}/healthz" || true)
     echo "- health check: code=${code:-none}, elapsed=${elapsed}s"
 
     if [ "$code" = "200" ]; then
       echo "Service is healthy."
-      cat /tmp/chaos-health.json || true
+      cat "$HEALTH_TMP_FILE" || true
       echo
       return 0
     fi
@@ -75,7 +77,7 @@ wait_for_health() {
   done
 
   echo "Timed out waiting for healthy service after ${HEALTH_TIMEOUT_SECONDS}s" >&2
-  cat /tmp/chaos-health.json 2>/dev/null || true
+  cat "$HEALTH_TMP_FILE" 2>/dev/null || true
   return 1
 }
 
@@ -109,6 +111,8 @@ wait_for_alarm_state() {
 }
 
 cleanup() {
+  rm -f "$HEALTH_TMP_FILE" || true
+
   if bool_is_true "$DESTROY_AT_END"; then
     echo
     echo "Destroying AWS stack because DESTROY_AT_END=${DESTROY_AT_END}"

@@ -16,8 +16,10 @@ groups:
           (
             sum(rate(chaos_http_requests_total{job="chaos-api",status=~"5.."}[2m]))
             /
-            clamp_min(sum(rate(chaos_http_requests_total{job="chaos-api"}[2m])), 0.001)
+            sum(rate(chaos_http_requests_total{job="chaos-api"}[2m]))
           ) > 0.20
+          and
+          sum(rate(chaos_http_requests_total{job="chaos-api"}[2m])) > 0
         for: 2m
         labels:
           severity: critical

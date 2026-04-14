@@ -201,7 +201,7 @@ resource "aws_ecs_service" "chaos_api" {
   launch_type     = "FARGATE"
   force_delete    = var.ecs_force_delete
 
-  deployment_minimum_healthy_percent = 50
+  deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
 
   network_configuration {

@@ -1,12 +1,37 @@
 'use strict';
 
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const express = require('express');
 const client = require('prom-client');
+
+// ---------------------------------------------------------------------------
+// Worker thread: CPU burn runs off the main event loop so the server stays
+// responsive to other requests during a CPU chaos injection.
+// ---------------------------------------------------------------------------
+if (!isMainThread) {
+  const stopAt = Date.now() + workerData.seconds * 1000;
+  let accumulator = 0;
+  while (Date.now() < stopAt) {
+    accumulator += Math.sqrt(Math.random() * Number.MAX_SAFE_INTEGER);
+  }
+  parentPort.postMessage({ done: true, accumulator });
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Main thread
+// ---------------------------------------------------------------------------
 
 const app = express();
 app.use(express.json());
 
 const port = Number(process.env.PORT || 8080);
+
+// Optional API key for chaos control endpoints. When set, requests to
+// /chaos/* must supply the matching "x-chaos-key" header.
+const CHAOS_API_KEY = process.env.CHAOS_API_KEY || '';
+
+const MEMORY_HARD_LIMIT_MB = 1024;
 
 const state = {
   errorRatePercent: 0,
@@ -71,6 +96,13 @@ const incidentModeGauge = new client.Gauge({
   registers: [register]
 });
 
+// Tracks how many times chaos state has been reset — useful for audit/review.
+const chaosResetCounter = new client.Counter({
+  name: 'chaos_resets_total',
+  help: 'Total number of times /chaos/reset has been called',
+  registers: [register]
+});
+
 function updateGauges() {
   errorRateGauge.set(state.errorRatePercent);
   latencyGauge.set(state.latencyMs);
@@ -127,15 +159,19 @@ function parseBoundedNumber(value, min, max) {
   return value;
 }
 
+// Runs CPU-intensive work in a Worker thread so the main event loop is not
+// blocked. Returns a Promise that resolves when the burn completes.
 function burnCpu(seconds) {
-  const stopAt = Date.now() + seconds * 1000;
-  let accumulator = 0;
-
-  while (Date.now() < stopAt) {
-    accumulator += Math.sqrt(Math.random() * Number.MAX_SAFE_INTEGER);
-  }
-
-  return accumulator;
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(__filename, { workerData: { seconds } });
+    worker.once('message', resolve);
+    worker.once('error', reject);
+    worker.once('exit', (code) => {
+      if (code !== 0) {
+        reject(new Error(`CPU burn worker exited with code ${code}`));
+      }
+    });
+  });
 }
 
 function maybeFail(route) {
@@ -186,6 +222,39 @@ async function handleBusinessRequest(route, req, res, payloadBuilder) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Authentication middleware for chaos control endpoints.
+// Only enforced when CHAOS_API_KEY is set in the environment.
+// ---------------------------------------------------------------------------
+function requireChaosKey(req, res, next) {
+  if (!CHAOS_API_KEY) {
+    return next();
+  }
+
+  const provided = req.headers['x-chaos-key'];
+  if (!provided || provided !== CHAOS_API_KEY) {
+    return res.status(401).json({ error: 'Missing or invalid x-chaos-key header' });
+  }
+
+  return next();
+}
+
+// ---------------------------------------------------------------------------
+// Ensure req.body is a plain object (guards against missing Content-Type or
+// empty body producing undefined/null, which would crash parseBoundedNumber).
+// ---------------------------------------------------------------------------
+function requireBody(req, res, next) {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return res.status(400).json({ error: 'Request body must be a JSON object' });
+  }
+
+  return next();
+}
+
+// ---------------------------------------------------------------------------
+// Health / readiness probes
+// ---------------------------------------------------------------------------
+
 app.get('/healthz', (req, res) => {
   if (state.dependencyDown) {
     return res.status(503).json({ ok: false, status: 'degraded' });
@@ -201,6 +270,10 @@ app.get('/readyz', (req, res) => {
 
   return res.status(200).json({ ok: true });
 });
+
+// ---------------------------------------------------------------------------
+// Business endpoints
+// ---------------------------------------------------------------------------
 
 app.get('/api/orders', async (req, res) => {
   return handleBusinessRequest('/api/orders', req, res, () => ({
@@ -229,7 +302,11 @@ app.get('/api/notifications', async (req, res) => {
   }));
 });
 
-app.get('/chaos/state', (req, res) => {
+// ---------------------------------------------------------------------------
+// Chaos control endpoints — protected by requireChaosKey + requireBody
+// ---------------------------------------------------------------------------
+
+app.get('/chaos/state', requireChaosKey, (req, res) => {
   return res.status(200).json({
     errorRatePercent: state.errorRatePercent,
     latencyMs: state.latencyMs,
@@ -238,7 +315,7 @@ app.get('/chaos/state', (req, res) => {
   });
 });
 
-app.post('/chaos/error-rate', (req, res) => {
+app.post('/chaos/error-rate', requireChaosKey, requireBody, (req, res) => {
   const percent = parseBoundedNumber(req.body.percent, 0, 100);
   if (percent === null) {
     return res.status(400).json({ error: 'percent must be a number between 0 and 100' });
@@ -250,7 +327,7 @@ app.post('/chaos/error-rate', (req, res) => {
   return res.status(200).json({ message: 'Error injection updated', percent: state.errorRatePercent });
 });
 
-app.post('/chaos/latency', (req, res) => {
+app.post('/chaos/latency', requireChaosKey, requireBody, (req, res) => {
   const latencyMs = parseBoundedNumber(req.body.ms, 0, 30000);
   if (latencyMs === null) {
     return res.status(400).json({ error: 'ms must be a number between 0 and 30000' });
@@ -262,7 +339,7 @@ app.post('/chaos/latency', (req, res) => {
   return res.status(200).json({ message: 'Latency injection updated', ms: state.latencyMs });
 });
 
-app.post('/chaos/dependency', (req, res) => {
+app.post('/chaos/dependency', requireChaosKey, requireBody, (req, res) => {
   const down = parseBoolean(req.body.down);
   if (down === null) {
     return res.status(400).json({ error: 'down must be true or false' });
@@ -274,10 +351,19 @@ app.post('/chaos/dependency', (req, res) => {
   return res.status(200).json({ message: 'Dependency state updated', dependencyDown: state.dependencyDown });
 });
 
-app.post('/chaos/memory', (req, res) => {
+app.post('/chaos/memory', requireChaosKey, requireBody, (req, res) => {
   const mb = parseBoundedNumber(req.body.mb, 1, 1024);
   if (mb === null) {
     return res.status(400).json({ error: 'mb must be a number between 1 and 1024' });
+  }
+
+  // Prevent cumulative allocations from exceeding the hard limit.
+  if (state.retainedMemoryMb + mb > MEMORY_HARD_LIMIT_MB) {
+    return res.status(400).json({
+      error: `Allocation would exceed the ${MEMORY_HARD_LIMIT_MB} MB hard limit`,
+      retainedMemoryMb: state.retainedMemoryMb,
+      requestedMb: mb
+    });
   }
 
   state.memoryChunks.push(Buffer.alloc(mb * 1024 * 1024, 0xff));
@@ -290,24 +376,30 @@ app.post('/chaos/memory', (req, res) => {
   });
 });
 
-app.post('/chaos/cpu', (req, res) => {
+app.post('/chaos/cpu', requireChaosKey, requireBody, async (req, res) => {
   const seconds = parseBoundedNumber(req.body.seconds, 1, 120);
   if (seconds === null) {
     return res.status(400).json({ error: 'seconds must be a number between 1 and 120' });
   }
 
-  burnCpu(seconds);
+  try {
+    await burnCpu(seconds);
+  } catch (err) {
+    console.error('CPU burn worker error:', err);
+    return res.status(500).json({ error: 'CPU burn failed internally' });
+  }
 
   return res.status(200).json({ message: 'CPU burn completed', seconds });
 });
 
-app.post('/chaos/reset', (req, res) => {
+app.post('/chaos/reset', requireChaosKey, (req, res) => {
   state.errorRatePercent = 0;
   state.latencyMs = 0;
   state.dependencyDown = false;
   state.retainedMemoryMb = 0;
   state.memoryChunks = [];
   updateGauges();
+  chaosResetCounter.inc();
 
   if (global.gc) {
     global.gc();
@@ -316,6 +408,10 @@ app.post('/chaos/reset', (req, res) => {
   return res.status(200).json({ message: 'Chaos state reset' });
 });
 
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
 app.get('/metrics', async (req, res) => {
   res.set('Content-Type', register.contentType);
   res.end(await register.metrics());
@@ -323,4 +419,9 @@ app.get('/metrics', async (req, res) => {
 
 app.listen(port, () => {
   console.log(`chaos-testing demo app listening on :${port}`);
+  if (CHAOS_API_KEY) {
+    console.log('Chaos control endpoints are protected by x-chaos-key authentication.');
+  } else {
+    console.log('Warning: CHAOS_API_KEY is not set. Chaos endpoints are unauthenticated.');
+  }
 });

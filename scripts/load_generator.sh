@@ -30,9 +30,18 @@ sleep_between_requests() {
 }
 
 while [ "$(date +%s)" -lt "$END_TS" ]; do
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET_URL" || true)
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --connect-timeout 5 "$TARGET_URL" 2>/dev/null)
+  CURL_EXIT=$?
 
   TOTAL=$((TOTAL + 1))
+
+  # Treat curl errors (network failure, timeout) as non-2xx responses.
+  if [ "$CURL_EXIT" -ne 0 ] || ! [[ "$STATUS" =~ ^[0-9]+$ ]]; then
+    ERRORS=$((ERRORS + 1))
+    sleep_between_requests
+    continue
+  fi
+
   if [[ "$STATUS" =~ ^2 ]]; then
     SUCCESS=$((SUCCESS + 1))
   else
