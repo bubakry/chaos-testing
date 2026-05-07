@@ -3,7 +3,7 @@
 ## Reporting a Vulnerability
 
 If you discover a security issue in this repository, please do **not** open a
-public GitHub issue. Instead, open a [private security advisory](https://github.com/bubakry/chaos-testing/security/advisories/new)
+public GitHub issue. Instead, open a [private security advisory](/security/advisories/new)
 on this repository.
 
 Please include:
