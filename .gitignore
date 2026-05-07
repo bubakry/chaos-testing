@@ -1,10 +1,25 @@
+# Node
 app/node_modules/
+
+# Python
 scripts/__pycache__/
 *.pyc
+.venv/
+
+# Logs
 *.log
 *.out
+
+# Terraform
 aws/.terraform/
 aws/.terraform.lock.hcl
 aws/terraform.tfstate
-aws/terraform.tfstate.backup
+aws/terraform.tfstate.*
 aws/*.tfvars
+aws/.terraform.tfstate.lock.info
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
