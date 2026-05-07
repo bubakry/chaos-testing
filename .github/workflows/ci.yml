@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: "1.9.8"
+  NODE_VERSION: "20"
+
+jobs:
+  terraform:
+    name: Terraform fmt + validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aws
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd  # v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform format check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (no backend)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on scripts
+        run: |
+          shopt -s globstar nullglob
+          shellcheck --severity=warning scripts/**/*.sh
+
+  node-app:
+    name: Node app smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: node --check server.js
+
+      - name: Boot the chaos API and probe endpoints
+        run: |
+          PORT=18080 node server.js &
+          APP_PID=$!
+          trap 'kill ${APP_PID} || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:18080/healthz" > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:18080/healthz"
+          curl -sf "http://127.0.0.1:18080/readyz"
+          curl -sf "http://127.0.0.1:18080/chaos/state"
+
+  docker-build:
+    name: Docker build (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Build chaos-api image
+        run: docker build --tag chaos-api:ci ./app
